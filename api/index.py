@@ -1,22 +1,13 @@
 import os
 import aiohttp
 from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram import Bot, Update
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY")
 
 app = FastAPI()
-
-# Khởi tạo đối tượng Bot Application
-ptb_app = Application.builder().token(TELEGRAM_TOKEN).build()
+bot = Bot(token=TELEGRAM_TOKEN)
 
 
 async def get_weather_data(city: str) -> str:
@@ -33,7 +24,7 @@ async def get_weather_data(city: str) -> str:
             if response.status == 404:
                 return f"❌ Không tìm thấy thành phố **{city}**. Vui lòng kiểm tra lại chính tả (thử gõ không dấu, ví dụ: `Hanoi`)."
             if response.status != 200:
-                return "⚠️ Dịch vụ thời tiết hiện đang gặp sự cố. Vui lòng thử lại sau."
+                return "⚠️ Dịch vụ thời tiết hiện đang gặp sự cố hoặc API Key chưa kích hoạt."
             data = await response.json()
 
     city_name = data["name"]
@@ -44,22 +35,8 @@ async def get_weather_data(city: str) -> str:
     wind_speed = data["wind"]["speed"]
     description = data["weather"][0]["description"].capitalize()
 
-    weather_id = data["weather"][0]["id"]
-    if 200 <= weather_id < 300:
-        icon = "⛈️"
-    elif 300 <= weather_id < 600:
-        icon = "🌧️"
-    elif 600 <= weather_id < 700:
-        icon = "❄️"
-    elif 700 <= weather_id < 800:
-        icon = "🌫️"
-    elif weather_id == 800:
-        icon = "☀️"
-    else:
-        icon = "☁️"
-
     return (
-        f"{icon} **Thời tiết tại {city_name}, {country}**\n"
+        f"🌤 **Thời tiết tại {city_name}, {country}**\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"• **Trạng thái:** {description}\n"
         f"• **Nhiệt độ:** {temp}°C (Cảm giác như {feels_like}°C)\n"
@@ -68,53 +45,37 @@ async def get_weather_data(city: str) -> str:
     )
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    welcome_text = (
-        "Xin chào! 👋 Tôi là Bot Dự Báo Thời Tiết (chạy trên Vercel).\n\n"
-        "**Cách sử dụng:**\n"
-        "• Gõ trực tiếp tên thành phố (VD: `Hanoi`, `Tokyo`)\n"
-        "• Hoặc dùng lệnh: `/thoitiet <tên thành phố>`"
-    )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+# Hứng mọi request GET (kiểm tra trạng thái)
+@app.get("/{full_path:path}")
+async def health_check(full_path: str = ""):
+    return {"status": "Bot is running on Vercel!", "path": full_path}
 
 
-async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
-        await update.message.reply_text(
-            "Vui lòng nhập tên thành phố. Ví dụ: `/thoitiet Da Nang`",
-            parse_mode="Markdown",
-        )
-        return
-    city = " ".join(context.args)
-    report = await get_weather_data(city)
-    await update.message.reply_text(report, parse_mode="Markdown")
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message and update.message.text:
-        city = update.message.text.strip()
-        report = await get_weather_data(city)
-        await update.message.reply_text(report, parse_mode="Markdown")
-
-
-# Đăng ký handlers
-ptb_app.add_handler(CommandHandler("start", start_command))
-ptb_app.add_handler(CommandHandler("help", start_command))
-ptb_app.add_handler(CommandHandler("thoitiet", weather_command))
-ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-
-@app.get("/")
-async def health_check():
-    """Endpoint kiểm tra trạng thái server"""
-    return {"status": "Bot is running on Vercel!"}
-
-
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    """Endpoint nhận tin nhắn từ Telegram"""
+# Hứng mọi request POST từ Telegram gửi tới (không bao giờ bị lệch 404)
+@app.post("/{full_path:path}")
+async def telegram_webhook(request: Request, full_path: str = ""):
     data = await request.json()
-    async with ptb_app:
-        update = Update.de_json(data, ptb_app.bot)
-        await ptb_app.process_update(update)
+    update = Update.de_json(data, bot)
+
+    if update.message and update.message.text:
+        chat_id = update.message.chat_id
+        text = update.message.text.strip()
+
+        if text.startswith("/start") or text.startswith("/help"):
+            reply = (
+                "Xin chào! 👋 Tôi là Bot Dự Báo Thời Tiết.\n\n"
+                "• Gõ trực tiếp tên thành phố (VD: `Hanoi`, `Tokyo`)\n"
+                "• Hoặc dùng lệnh: `/thoitiet <tên thành phố>`"
+            )
+        elif text.startswith("/thoitiet"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                reply = "Vui lòng nhập tên thành phố. Ví dụ: `/thoitiet Da Nang`"
+            else:
+                reply = await get_weather_data(parts[1])
+        else:
+            reply = await get_weather_data(text)
+
+        await bot.send_message(chat_id=chat_id, text=reply, parse_mode="Markdown")
+
     return {"ok": True}
